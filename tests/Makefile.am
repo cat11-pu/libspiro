@@ -10,7 +10,7 @@ LDADDS = $(top_builddir)/libspiro.la
 EXTRA_DIST = call-test.c
 
 # The tests
-noinst_PROGRAMS = unit-test  call-test0 call-test1 call-test2 call-test3 \
+noinst_PROGRAMS = unit-test property-test call-test0 call-test1 call-test2 call-test3 \
 		  call-test4 call-test5 call-test6 call-test7 call-test8 \
 		  call-test9 call-test10 call-test11 call-test12	 \
 		  call-test13 call-test14 call-test15 call-test16	 \
@@ -18,6 +18,9 @@ noinst_PROGRAMS = unit-test  call-test0 call-test1 call-test2 call-test3 \
 		  call-test21 call-testm
 
 unit_test_SOURCES = unit-test.c
+
+property_test_SOURCES = property-test.c
+property_test_LDADD = $(LDADDS)
 
 call_test0_SOURCES = call-test0.c
 call_test0_LDADD = $(LDADDS)
