@@ -538,8 +538,9 @@ setup_path0(const spiro_cp *src, double *dm, int n)
 	return 0;
     }
 
-#ifdef CHECK_INPUT_FINITENESS
-    /* Verify that input values are within realistic limits */
+    /* Verify that input values are within realistic limits. This guard is
+       always active: a non-finite coordinate can only produce non-finite
+       geometry, so reject it explicitly instead of leaking NaN/Inf. */
     for (i = 0; i < n; i++) {
 	if (IS_FINITE(src[i].x)==0 || IS_FINITE(src[i].y)==0) {
 #ifdef VERBOSE
@@ -549,7 +550,6 @@ setup_path0(const spiro_cp *src, double *dm, int n)
 	    return 0;
 	}
     }
-#endif
 
     n_seg = src[0].ty == '{' ? n - 1 : n;
     i = (int)((unsigned int)(n_seg + 1) * sizeof(spiro_seg));
@@ -570,6 +570,38 @@ setup_path0(const spiro_cp *src, double *dm, int n)
 	dm[2] /* yoff */ = (ymin + ymax) / 2; ymax -= ymin;
 	dm[0] /* scale */ = fabs((fabs(xmax) >= fabs(ymax)) ? xmax : ymax);
 	dm[0] /* scale */ /= 500.; /* ~ backward compatible */
+	if (dm[0] == 0.) {
+	    /* Degenerate span. For an open contour the historical scan above
+	       omits the final end point (n_seg == n-1), so a contour whose
+	       only extent lives in that last knot (e.g. an end 'v') produced
+	       a zero scale and then divided by zero. Rescan including the end
+	       knot; if the span is genuinely zero (duplicate/coincident
+	       points) clamp to a safe positive scale instead. */
+	    xmin = xmax = src[0].x; ymin = ymax = src[0].y;
+	    for (i = 0; i <= n_seg; i++) {
+		if (src[i].ty != 'z' && src[i].ty != 'h') {
+		    if (src[i].x < xmin) xmin = src[i].x; else
+		    if (src[i].x > xmax) xmax = src[i].x;
+		    if (src[i].y < ymin) ymin = src[i].y; else
+		    if (src[i].y > ymax) ymax = src[i].y;
+		}
+	    }
+	    dm[1] = (xmin + xmax) / 2; xmax -= xmin;
+	    dm[2] = (ymin + ymax) / 2; ymax -= ymin;
+	    dm[0] = fabs((fabs(xmax) >= fabs(ymax)) ? xmax : ymax);
+	    dm[0] /= 500.;
+	    if (dm[0] == 0.)
+		dm[0] = 1.; /* all-coincident points: safe fallback scale */
+	}
+	if (IS_FINITE(dm[0])==0) {
+	    /* Coordinate span overflows double (e.g. ~1e308 apart): the
+	       normalized points would be NaN/Inf. Reject explicitly. */
+#ifdef VERBOSE
+	    fprintf(stderr, "ERROR: LibSpiro: coordinate span too large, scale=%g.\n", dm[0]);
+#endif
+	    free(r);
+	    return 0;
+	}
     }
 #ifdef VERBOSE
 	printf("scale=%g, x_offset=%g, y_offset=%g, n=%d, n_seg=%d\n", dm[0], dm[1], dm[2], n, n_seg);
@@ -616,9 +648,6 @@ setup_path0(const spiro_cp *src, double *dm, int n)
 	}
 	dx = r[i + 1].x - r[i].x;
 	dy = r[i + 1].y - r[i].y;
-#ifndef CHECK_INPUT_FINITENESS
-	r[i].seg_ch = hypot(dx, dy);
-#else
 	if (IS_FINITE(dx)==0 || IS_FINITE(dy)==0 || \
 	    IS_FINITE((r[i].seg_ch = hypot(dx, dy)))==0) {
 #ifdef VERBOSE
@@ -627,7 +656,6 @@ setup_path0(const spiro_cp *src, double *dm, int n)
 #endif
 	    goto setup_path_error0;
 	}
-#endif
 	r[i].seg_th = atan2(dy, dx);
     }
 
@@ -658,9 +686,7 @@ setup_path_error1:
     fprintf(stderr, "ERROR: LibSpiro: #%d={'%c',%g,%g} found unpaired anchor+handle 'ah'.\n", \
 	    i, src[i].ty, src[i].x, src[i].y);
 #endif
-#ifdef CHECK_INPUT_FINITENESS
 setup_path_error0:
-#endif
     free(r);
     return 0;
 }
@@ -1043,7 +1069,9 @@ solve_spiroerr0:
     return converged;
 }
 
-static void
+/* Returns 1 when the whole segment was emitted with finite coordinates,
+   0 as soon as a non-finite value would have been sent to the bezctx. */
+static int
 spiro_seg_to_bpath1(const double ks[4], double *dm, double *di,
 		   double x0, double y0, double x1, double y1,
 		   bezctx *bc, int ncq, int si, int depth)
@@ -1055,16 +1083,21 @@ spiro_seg_to_bpath1(const double ks[4], double *dm, double *di,
 
     bend = fabs(ks[0]) + fabs(.5 * ks[1]) + fabs(.125 * ks[2]) +
 	fabs((1./48) * ks[3]);
+    if (IS_FINITE(bend)==0) return 0;
 
     if (bend <= 1e-8) {
 	if (di[3] < x1 && x1 < di[4] && di[6] < y1 && y1 < di[7]) {
 #ifdef VERBOSE
 	    printf("...to next knot point...\n");
 #endif
+	    if (IS_FINITE(di[2])==0 || IS_FINITE(di[5])==0) return 0;
 	    bezctx_lineto(bc, di[2], di[5], si);
 	} else {
+	    if (IS_FINITE(x1 * dm[0] + dm[1])==0 || \
+		IS_FINITE(y1 * dm[0] + dm[2])==0) return 0;
 	    bezctx_lineto(bc, x1 * dm[0] + dm[1], y1 * dm[0] + dm[2], si);
 	}
+	return 1;
     } else {
 	seg_ch = hypot(x1 - x0, y1 - y0);
 	seg_th = atan2(y1 - y0, x1 - x0);
@@ -1072,6 +1105,7 @@ spiro_seg_to_bpath1(const double ks[4], double *dm, double *di,
 	integrate_spiro(ks, xy, N_IS);
 	ch = hypot(xy[0], xy[1]);
 	th = atan2(xy[1], xy[0]);
+	if (IS_FINITE(seg_ch)==0 || IS_FINITE(ch)==0 || ch == 0.) return 0;
 	scale = seg_ch / ch;
 	rot = seg_th - th;
 	if (ncq == 0 && (depth > 5 || bend < di[0])) {
@@ -1086,14 +1120,26 @@ spiro_seg_to_bpath1(const double ks[4], double *dm, double *di,
 #ifdef VERBOSE
 		printf("...to next knot point...\n");
 #endif
+		if (IS_FINITE((x0 + ul) * dm[0] + dm[1])==0 || \
+		    IS_FINITE((y0 + vl) * dm[0] + dm[2])==0 || \
+		    IS_FINITE((x1 - ur) * dm[0] + dm[1])==0 || \
+		    IS_FINITE((y1 - vr) * dm[0] + dm[2])==0 || \
+		    IS_FINITE(di[2])==0 || IS_FINITE(di[5])==0) return 0;
 		bezctx_curveto(bc, ((x0 + ul) * dm[0] + dm[1]), ((y0 + vl) * dm[0] + dm[2]), \
 				((x1 - ur) * dm[0] + dm[1]), ((y1 - vr) * dm[0] + dm[2]), \
 				di[2], di[5], si);
 	    } else {
+		if (IS_FINITE((x0 + ul) * dm[0] + dm[1])==0 || \
+		    IS_FINITE((y0 + vl) * dm[0] + dm[2])==0 || \
+		    IS_FINITE((x1 - ur) * dm[0] + dm[1])==0 || \
+		    IS_FINITE((y1 - vr) * dm[0] + dm[2])==0 || \
+		    IS_FINITE(x1 * dm[0] + dm[1])==0 || \
+		    IS_FINITE(y1 * dm[0] + dm[2])==0) return 0;
 		bezctx_curveto(bc, ((x0 + ul) * dm[0] + dm[1]), ((y0 + vl) * dm[0] + dm[2]), \
 				((x1 - ur) * dm[0] + dm[1]), ((y1 - vr) * dm[0] + dm[2]), \
 				(x1 * dm[0] + dm[1]), (y1 * dm[0] + dm[2]), si);
 	    }
+	    return 1;
 	} else {
 	    /* subdivide */
 	    ksub[0] = .5 * ks[0] - .125 * ks[1] + (1./64) * ks[2] - (1./768) * ks[3];
@@ -1106,6 +1152,7 @@ spiro_seg_to_bpath1(const double ks[4], double *dm, double *di,
 	    integrate_spiro(ksub, xysub, N_IS);
 	    xmid = x0 + cth * xysub[0] - sth * xysub[1];
 	    ymid = y0 + cth * xysub[1] + sth * xysub[0];
+	    if (IS_FINITE(xmid)==0 || IS_FINITE(ymid)==0) return 0;
 	    if (ncq != 0 && (depth > 5 || bend < di[0])) {
 		if (ncq < 0) {
 		    /* looks like an arc (use quadto output). */
@@ -1113,9 +1160,16 @@ spiro_seg_to_bpath1(const double ks[4], double *dm, double *di,
 #ifdef VERBOSE
 			printf("...to next knot point...\n");
 #endif
+			if (IS_FINITE(xmid * dm[0] + dm[1])==0 || \
+			    IS_FINITE(ymid * dm[0] + dm[2])==0 || \
+			    IS_FINITE(di[2])==0 || IS_FINITE(di[5])==0) return 0;
 			bezctx_quadto(bc, (xmid * dm[0] + dm[1]), \
 				      (ymid * dm[0] + dm[2]), di[2], di[5], si);
 		    } else {
+			if (IS_FINITE(xmid * dm[0] + dm[1])==0 || \
+			    IS_FINITE(ymid * dm[0] + dm[2])==0 || \
+			    IS_FINITE(x1 * dm[0] + dm[1])==0 || \
+			    IS_FINITE(y1 * dm[0] + dm[2])==0) return 0;
 			bezctx_quadto(bc, (xmid * dm[0] + dm[1]), \
 				      (ymid * dm[0] + dm[2]), (x1 * dm[0] + dm[1]), \
 				      (y1 * dm[0] + dm[2]), si);
@@ -1128,31 +1182,50 @@ spiro_seg_to_bpath1(const double ks[4], double *dm, double *di,
 		    vl = (scale * (1./6)) * sin(th_even - th_odd);
 		    ur = (scale * (1./6)) * cos(th_even + th_odd);
 		    vr = (scale * (1./6)) * sin(th_even + th_odd);
+		    if (IS_FINITE((x0 + ul) * dm[0] + dm[1])==0 || \
+			IS_FINITE((y0 + vl) * dm[0] + dm[2])==0 || \
+			IS_FINITE(xmid * dm[0] + dm[1])==0 || \
+			IS_FINITE(ymid * dm[0] + dm[2])==0 || \
+			IS_FINITE((x1 - ur) * dm[0] + dm[1])==0 || \
+			IS_FINITE((y1 - vr) * dm[0] + dm[2])==0 || \
+			IS_FINITE(x1 * dm[0] + dm[1])==0 || \
+			IS_FINITE(y1 * dm[0] + dm[2])==0) return 0;
 		    bezctx_quadto(bc, ((x0 + ul) * dm[0] + dm[1]), ((y0 + vl) * dm[0] + dm[2]), \
 					(xmid * dm[0] + dm[1]), (ymid * dm[0] + dm[2]), si);
 		    if (di[3] < x1 && x1 < di[4] && di[6] < y1 && y1 < di[7]) {
 #ifdef VERBOSE
 			printf("...to next knot point...\n");
 #endif
+			if (IS_FINITE((x1 - ur) * dm[0] + dm[1])==0 || \
+			    IS_FINITE((y1 - vr) * dm[0] + dm[2])==0 || \
+			    IS_FINITE(di[2])==0 || IS_FINITE(di[5])==0) return 0;
 			bezctx_quadto(bc, ((x1 - ur) * dm[0] + dm[1]), ((y1 - vr) * dm[0] + dm[2]), \
 					    di[2], di[5], si);
 		    } else {
+			if (IS_FINITE((x1 - ur) * dm[0] + dm[1])==0 || \
+			    IS_FINITE((y1 - vr) * dm[0] + dm[2])==0 || \
+			    IS_FINITE(x1 * dm[0] + dm[1])==0 || \
+			    IS_FINITE(y1 * dm[0] + dm[2])==0) return 0;
 			bezctx_quadto(bc, ((x1 - ur) * dm[0] + dm[1]), ((y1 - vr) * dm[0] + dm[2]), \
 					    (x1 * dm[0] + dm[1]), (y1 * dm[0] + dm[2]), si);
 		    }
 		}
+		return 1;
 	    } else {
 #ifdef VERBOSE
 		printf("...subdivide curve...\n");
 #endif
-		spiro_seg_to_bpath1(ksub, dm, di, x0, y0, xmid, ymid, bc, ncq, si, depth + 1);
+		if (spiro_seg_to_bpath1(ksub, dm, di, x0, y0, xmid, ymid, bc, ncq, si, depth + 1)==0)
+		    return 0;
 		ksub[0] += .25 * ks[1] + (1./384) * ks[3];
 		ksub[1] += .125 * ks[2];
 		ksub[2] += (1./16) * ks[3];
-		spiro_seg_to_bpath1(ksub, dm, di, xmid, ymid, x1, y1, bc, ncq, si, depth + 1);
+		if (spiro_seg_to_bpath1(ksub, dm, di, xmid, ymid, x1, y1, bc, ncq, si, depth + 1)==0)
+		    return 0;
+		return 1;
 	    }
 	}
-    }
+}
 }
 
 /* deprecated / keep backwards compatibility / not scalable */
@@ -1165,7 +1238,7 @@ spiro_seg_to_bpath(const double ks[4],
     set_dm_to_1(dm);
     di[1] = 0.0005 * 500; /* assume size in range {0..1000} */
     set_di_to_x1y1(di, dm, x1, y1);
-    spiro_seg_to_bpath1(ks, dm, di, x0, y0, x1, y1, bc, SPIRO_RETRO_VER1, 0, depth);
+    (void)spiro_seg_to_bpath1(ks, dm, di, x0, y0, x1, y1, bc, SPIRO_RETRO_VER1, 0, depth);
 }
 
 /* This function reverses src path for calling application. */
@@ -1341,12 +1414,31 @@ spiro_to_bpath0(const spiro_cp *src, const spiro_seg *s,
 	ncq = 0x10;
     }
 
+    /* Output gate: refuse to build a path from non-finite solver state or
+       transform parameters. Without this, a degenerate solve could push
+       NaN/Inf into the user's bezctx callbacks. */
+    if (IS_FINITE(dm[0])==0 || IS_FINITE(dm[1])==0 || IS_FINITE(dm[2])==0 || \
+	(dm[0] != 0. && IS_FINITE(di[0])==0))
+	return 0;
+    for (i = 0; i < n; i++) {
+	int k;
+	if (IS_FINITE(s[i].x)==0 || IS_FINITE(s[i].y)==0 || \
+	    IS_FINITE(s[i].seg_ch)==0 || IS_FINITE(s[i].seg_th)==0)
+	    return 0;
+	for (k = 0; k < 4; k++)
+	    if (IS_FINITE(s[i].ks[k])==0)
+		return 0;
+    }
+
     for (i=j=0; i < nsegs; i++,j++) {
 	x0 = s[i].x; y0 = s[i].y;
 	if (i == 0) {
 	    if (src != NULL) {
+		if (IS_FINITE(src[0].x)==0 || IS_FINITE(src[0].y)==0) return 0;
 		bezctx_moveto(bc, src[0].x, src[0].y, s[0].ty == '{', si);
 	    } else {
+		if (IS_FINITE(x0 * dm[0] + dm[1])==0 || \
+		    IS_FINITE(y0 * dm[0] + dm[2])==0) return 0;
 		bezctx_moveto(bc, (x0 * dm[0] + dm[1]), (y0 * dm[0] + dm[2]), s[0].ty == '{', si);
 	    }
 	    if (nsegs > 1 && s[1].ty == 'h') ++i;
@@ -1367,7 +1459,8 @@ spiro_to_bpath0(const spiro_cp *src, const spiro_seg *s,
 	}
 
 	bezctx_mark_knot(bc, j, si);
-	spiro_seg_to_bpath1(s[i].ks, dm, di, x0, y0, x1, y1, bc, ncq, si, 0);
+	if (spiro_seg_to_bpath1(s[i].ks, dm, di, x0, y0, x1, y1, bc, ncq, si, 0)==0)
+	    return 0;
     }
     if (lk) bezctx_mark_knot(bc, j, si);
     return 1;

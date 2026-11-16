@@ -1,0 +1,15 @@
+prefix=/usr/local
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+datarootdir=${prefix}/share
+mandir=${datarootdir}/man
+
+Name: libspiro
+Description: A library for curve design. Clothoid to bezier conversion. A mechanism for drawing smooth contours with constant curvature at the spline joins.
+URL: https://github.com/fontforge/libspiro
+Version: 20240903
+Requires:
+Libs: -L${libdir} -lspiro
+Cflags: -I${includedir}
+

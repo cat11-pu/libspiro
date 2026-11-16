@@ -1,0 +1,8 @@
+SCAN total=456 bad_nonfinite=35
+
+category                total       ok   reject nonfinite
+A:closed-magnitude        144      130       14        7
+B:duplicate-chord         144       48       96        8
+C:open-magnitude          144      108       36       20
+D:nonfinite-inject         24        0       24        0
+TOTAL                     456      286      170       35

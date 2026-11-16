@@ -1,0 +1,7 @@
+spiroentrypoints.lo: spiroentrypoints.c /usr/include/stdc-predef.h \
+ spiroentrypoints.h bezctx.h spiro.h spiro_intf.h
+/usr/include/stdc-predef.h:
+spiroentrypoints.h:
+bezctx.h:
+spiro.h:
+spiro_intf.h:
