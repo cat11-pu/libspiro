@@ -116,6 +116,11 @@ fi
 AC_CHECK_FUNCS(hypot, ,[AC_MSG_FAILURE([ERROR: hypot() required but not found.],[1])])
 
 #-------------------------------------------
+# Check for GNU sincos. Optional: one trig call instead of two in the
+# curve integrator. Bit-identical results, just faster when present.
+AC_CHECK_FUNCS([sincos])
+
+#-------------------------------------------
 # Check for C99 isfinite or finite. Use one.
 math_isfinite=no
 math_finite=no

@@ -28,6 +28,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
 */
 /* C implementation of third-order polynomial spirals. */
 
+#include "spiro-config.h"
+
 #include <math.h>
 #ifdef HAVE_FINITE
 #include <float.h>
@@ -40,7 +42,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
 #include "spiro_intf.h"
 #include "spiro.h"
 
-#include "spiro-config.h"
 #ifdef VERBOSE
 #include <stdio.h>
 #endif
@@ -61,6 +62,16 @@ typedef struct {
 
 #ifndef ORDER
 #define ORDER 12
+#endif
+
+#ifdef HAVE_SINCOS
+/* one trig call instead of two; verified bit-identical to separate */
+/* sin()/cos() calls on glibc. Declared directly since _GNU_SOURCE */
+/* may be locked out by earlier system includes (tests/unit-test.c). */
+extern void sincos(double, double *, double *);
+#define SPIRO_SINCOS(th, s, c) sincos((th), (s), (c))
+#else
+#define SPIRO_SINCOS(th, s, c) *(c) = cos(th), *(s) = sin(th)
 #endif
 
 /* Integrate polynomial spiral curve over range -.5 .. .5. */
@@ -405,8 +416,9 @@ integrate_spiro(const double ks[4], double xy[2], int n)
 #endif
 	} else {
 	    double th = (((th4 * s + th3) * s + th2) * s + th1) * s;
-	    double cth = cos(th);
-	    double sth = sin(th);
+	    double cth, sth;
+
+	    SPIRO_SINCOS(th, &sth, &cth);
 
 #if ORDER == 2
 	    x += cth;
@@ -972,6 +984,8 @@ solve_spiro(spiro_seg *s, int n)
     double *v;
     int *perm, *jinca;
     double norm;
+    char *arena;
+    size_t sz;
 
     i = converged = 0; /* not solved (yet) */
     z = -1;
@@ -990,16 +1004,14 @@ solve_spiro(spiro_seg *s, int n)
 	goto solve_spiroerr0;
     }
 
-    if ((jinca = (int *)malloc((unsigned int)(sizeof(int) * nseg))) == NULL) {
-#ifdef VERBOSE
-	fprintf(stderr, "ERROR: LibSpiro: failed to alloc memory.\n");
-#endif
-	goto solve_spiroerr0;
-    }
-    nmat = count_vec(s, jinca, nseg);
+    /* count the constraint vector size first, so that all scratch */
+    /* buffers can be carved out of a single arena allocation.     */
+    nmat = 0;
+    for (i = 0; i < nseg; i++)
+	nmat += compute_jinc(s[i].ty, s[i + 1].ty);
     if (nmat == 0) {
 	converged = 1; /* means no convergence problems */
-	goto solve_spiroerr1;
+	goto solve_spiroerr0;
     }
     n_alloc = nmat;
     cyclic = 0;
@@ -1012,11 +1024,20 @@ solve_spiro(spiro_seg *s, int n)
 #ifdef VERBOSE
     printf("nmat=%d, alloc=%d, cyclic=%d, n=%d, nseg=%d\n", nmat, n_alloc, cyclic, n, nseg);
 #endif
-    m = (bandmat *)malloc(sizeof(bandmat) * (unsigned int)(n_alloc));
-    v = (double *)malloc(sizeof(double) * (unsigned int)(n_alloc));
-    perm = (int *)malloc(sizeof(int) * (unsigned int)(n_alloc));
+    /* one arena for m/v/perm/jinca: fewer temp objects per contour, */
+    /* and the widest-aligned members (bandmat, double) come first.  */
+    sz = sizeof(bandmat) * (size_t)(n_alloc) +
+	 sizeof(double) * (size_t)(n_alloc) +
+	 sizeof(int) * (size_t)(n_alloc) +
+	 sizeof(int) * (size_t)(nseg);
+    if ((arena = (char *)malloc(sz)) != NULL) {
+	m = (bandmat *)arena;
+	v = (double *)(m + n_alloc);
+	perm = (int *)(v + n_alloc);
+	jinca = perm + n_alloc;
+	nmat = count_vec(s, jinca, nseg);
 
-    if ( m!=NULL && v!=NULL && perm!=NULL ) {
+	i = 0; /* reset iteration counter (used by the count loop above) */
 	while (i++ < 60) {
 	    norm = spiro_iter(s, m, perm, v, jinca, nseg, cyclic, nmat);
 	    if (IS_FINITE(norm)==0) break;
@@ -1033,11 +1054,7 @@ solve_spiro(spiro_seg *s, int n)
 #endif
     }
 
-    free(perm);
-    free(v);
-    free(m);
-solve_spiroerr1:
-    free(jinca);
+    free(arena);
 solve_spiroerr0:
     if (z >= 0) s[z].ty = 'z';
     return converged;
@@ -1078,10 +1095,12 @@ spiro_seg_to_bpath1(const double ks[4], double *dm, double *di,
 	    /* calculate cubic, and output bezier points */
 	    th_even = (1./384) * ks[3] + (1./8) * ks[1] + rot;
 	    th_odd = (1./48) * ks[2] + .5 * ks[0];
-	    ul = (scale * (1./3)) * cos(th_even - th_odd);
-	    vl = (scale * (1./3)) * sin(th_even - th_odd);
-	    ur = (scale * (1./3)) * cos(th_even + th_odd);
-	    vr = (scale * (1./3)) * sin(th_even + th_odd);
+	    SPIRO_SINCOS(th_even - th_odd, &vl, &ul);
+	    SPIRO_SINCOS(th_even + th_odd, &vr, &ur);
+	    ul *= scale * (1./3);
+	    vl *= scale * (1./3);
+	    ur *= scale * (1./3);
+	    vr *= scale * (1./3);
 	    if (di[3] < x1 && x1 < di[4] && di[6] < y1 && y1 < di[7]) {
 #ifdef VERBOSE
 		printf("...to next knot point...\n");
@@ -1101,8 +1120,9 @@ spiro_seg_to_bpath1(const double ks[4], double *dm, double *di,
 	    ksub[2] = .125 * ks[2] - (1./32) * ks[3];
 	    ksub[3] = (1./16) * ks[3];
 	    thsub = rot - .25 * ks[0] + (1./32) * ks[1] - (1./384) * ks[2] + (1./6144) * ks[3];
-	    cth = .5 * scale * cos(thsub);
-	    sth = .5 * scale * sin(thsub);
+	    SPIRO_SINCOS(thsub, &sth, &cth);
+	    cth *= .5 * scale;
+	    sth *= .5 * scale;
 	    integrate_spiro(ksub, xysub, N_IS);
 	    xmid = x0 + cth * xysub[0] - sth * xysub[1];
 	    ymid = y0 + cth * xysub[1] + sth * xysub[0];
@@ -1124,10 +1144,12 @@ spiro_seg_to_bpath1(const double ks[4], double *dm, double *di,
 		    /* create quadratic bezier approximations */
 		    th_even = (1./384) * ks[3] + (1./8) * ks[1] + rot;
 		    th_odd = (1./48) * ks[2] + .5 * ks[0];
-		    ul = (scale * (1./6)) * cos(th_even - th_odd);
-		    vl = (scale * (1./6)) * sin(th_even - th_odd);
-		    ur = (scale * (1./6)) * cos(th_even + th_odd);
-		    vr = (scale * (1./6)) * sin(th_even + th_odd);
+		    SPIRO_SINCOS(th_even - th_odd, &vl, &ul);
+		    SPIRO_SINCOS(th_even + th_odd, &vr, &ur);
+		    ul *= scale * (1./6);
+		    vl *= scale * (1./6);
+		    ur *= scale * (1./6);
+		    vr *= scale * (1./6);
 		    bezctx_quadto(bc, ((x0 + ul) * dm[0] + dm[1]), ((y0 + vl) * dm[0] + dm[2]), \
 					(xmid * dm[0] + dm[1]), (ymid * dm[0] + dm[2]), si);
 		    if (di[3] < x1 && x1 < di[4] && di[6] < y1 && y1 < di[7]) {
