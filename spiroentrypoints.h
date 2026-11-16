@@ -5,6 +5,7 @@ libspiro - A sharable library of Spiro formula and functions.
 #define _SPIROENTRYPOINTS_H
 #include "bezctx.h"
 #include "spiro.h"
+#include "spirobatch.h"
 
 #ifdef __cplusplus
 extern "C" {

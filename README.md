@@ -103,6 +103,8 @@ Mac OS X: A helping script, `./fontforge.sh` is provided to run FontForge inside
 - Entry points
   - int [SpiroCPsToBezier2](#spirocpstobezier2)(spiro_cp *,int n,int ncq,int is_closed,bezctx *)
   - int [TaggedSpiroCPsToBezier2](#taggedspirocpstobezier2)(spiro_cp *,int ncq,bezctx *)
+  - int [SpiroCPsToBezierTol](spirobatch.md)(spiro_cp *,int n,int ncq,int is_closed,double tolerance,spiro_batch_result *)
+  - int [SpiroCPsToBezierBatch](spirobatch.md)(spiro_contour *,int ncontours,int ncq,double tolerance,spiro_batch_result *)
 
 #### Basic Types
 

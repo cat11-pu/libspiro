@@ -26,17 +26,18 @@ lib_LTLIBRARIES = libspiro.la
 libspiro_la_LIBADD = $(WLSLIB) $(LS_LIB)
 libspiro_la_LDFLAGS = -no-undefined -version-info $(LIBSPIRO_VERSION)
 libspiro_la_SOURCES = spiro.c bezctx.c spiroentrypoints.c \
-	bezctx.h bezctx_intf.h spiro.h spiro_intf.h spiroentrypoints.h
+	bezctx.h bezctx_intf.h spiro.h spiro_intf.h spiroentrypoints.h \
+	spirobatch.h
 
 EXTRA_DIST = bezctx.md README-RaphLevien README.md README-GeorgeWilliams    \
 	closedspiro.png openspiro.png spiral16.png spiral32.png spiro-a.png \
 	java/ShowPlate.java java/Spiro.java java/SpiroBezierContext.java    \
 	java/SpiroCanvas.java java/SpiroCP.java java/SpiroGeneralPath.java  \
 	java/SpiroPointType.java m4/ax_check_compile_flag.m4 path5.png      \
-	path6.png libspiro.3
+	path6.png libspiro.3 spirobatch.md
 nodist_EXTRA_DATA = .git .github
 
-include_HEADERS = bezctx.h spiro.h spiroentrypoints.h
+include_HEADERS = bezctx.h spiro.h spiroentrypoints.h spirobatch.h
 man_MANS = libspiro.3
 
 libtool: $(LIBTOOL_DEPS)
@@ -52,4 +53,3 @@ if HAVEVALGRIND
 else
 	echo "install Valgrind, then run ./configure again"
 endif
-

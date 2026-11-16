@@ -29,6 +29,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
 /* C implementation of third-order polynomial spirals. */
 
 #include <math.h>
+#include <float.h>
 #ifdef HAVE_FINITE
 #include <float.h>
 #endif
@@ -1153,6 +1154,381 @@ spiro_seg_to_bpath1(const double ks[4], double *dm, double *di,
 	    }
 	}
     }
+}
+
+#define SPIRO_TOL_MAX_DEPTH 14
+#define SPIRO_TOL_SAMPLES 33
+#define SPIRO_TOL_EVAL_STEPS 64
+#define SPIRO_TOL_EPS 1e-13
+
+typedef struct {
+    double p0x, p0y;
+    double p1x, p1y;
+    double p2x, p2y;
+    double p3x, p3y;
+} spiro_cubic_candidate;
+
+static double
+spiro_theta_at(const double ks[4], double s)
+{
+    double t1 = ks[0];
+    double t2 = .5 * ks[1];
+    double t3 = (1./6) * ks[2];
+    double t4 = (1./24) * ks[3];
+
+    return (((t4 * s + t3) * s + t2) * s + t1) * s;
+}
+
+/* Express a prefix [a, a + len] of a Spiro segment in the polynomial-spiral
+   form consumed by integrate_spiro(). */
+static void
+spiro_prefix_ks(const double ks[4], double a, double len, double out[4])
+{
+    double c0 = ks[0];
+    double c1 = ks[1];
+    double c2 = .5 * ks[2];
+    double c3 = (1./6) * ks[3];
+    double a2 = a * a;
+    double a3 = a2 * a;
+    double d0 = c0 + c1 * a + c2 * a2 + c3 * a3;
+    double d1 = c1 * len + 2 * c2 * a * len + 3 * c3 * a2 * len;
+    double d2 = c2 * len * len + 3 * c3 * a * len * len;
+    double d3 = c3 * len * len * len;
+    double e0 = len * d0;
+    double e1 = len * d1;
+    double e2 = len * d2;
+    double e3 = len * d3;
+    double f0 = e0 + .5 * e1 + .25 * e2 + .125 * e3;
+    double f1 = e1 + e2 + .75 * e3;
+    double f2 = e2 + 1.5 * e3;
+
+    out[0] = f0;
+    out[1] = f1;
+    out[2] = 2 * f2;
+    out[3] = 6 * e3;
+}
+
+static void
+spiro_eval_prefix(const double ks[4], double t, double scale, double rot,
+                  double x0, double y0, double p[2], double dp[2])
+{
+    double local_ks[4];
+    double xy[2];
+    double center;
+    double cth, sth;
+    double vx, vy;
+
+    if (t <= 0) {
+        p[0] = x0;
+        p[1] = y0;
+    } else {
+        spiro_prefix_ks(ks, -.5, t, local_ks);
+        integrate_spiro(local_ks, xy, SPIRO_TOL_EVAL_STEPS);
+        xy[0] *= t;
+        xy[1] *= t;
+        center = spiro_theta_at(ks, -.5 + .5 * t);
+        cth = cos(center);
+        sth = sin(center);
+        vx = xy[0] * cth - xy[1] * sth;
+        vy = xy[0] * sth + xy[1] * cth;
+        p[0] = x0 + scale * (vx * cos(rot) - vy * sin(rot));
+        p[1] = y0 + scale * (vx * sin(rot) + vy * cos(rot));
+    }
+    center = rot + spiro_theta_at(ks, -.5 + t);
+    dp[0] = scale * cos(center);
+    dp[1] = scale * sin(center);
+}
+
+static void
+spiro_cubic_eval(const spiro_cubic_candidate *c, double t,
+                 double p[2], double dp[2])
+{
+    double mt = 1 - t;
+    double mt2 = mt * mt;
+    double t2 = t * t;
+    double b0 = mt2 * mt;
+    double b1 = 3 * mt2 * t;
+    double b2 = 3 * mt * t2;
+    double b3 = t2 * t;
+    double d0 = 3 * mt2;
+    double d1 = 6 * mt * t;
+    double d2 = 3 * t2;
+
+    p[0] = b0 * c->p0x + b1 * c->p1x + b2 * c->p2x + b3 * c->p3x;
+    p[1] = b0 * c->p0y + b1 * c->p1y + b2 * c->p2y + b3 * c->p3y;
+    dp[0] = d0 * (c->p1x - c->p0x) + d1 * (c->p2x - c->p1x) +
+            d2 * (c->p3x - c->p2x);
+    dp[1] = d0 * (c->p1y - c->p0y) + d1 * (c->p2y - c->p1y) +
+            d2 * (c->p3y - c->p2y);
+}
+
+static int
+spiro_make_candidate(const double ks[4], const double *dm,
+                     double x0, double y0, double x1, double y1,
+                     spiro_cubic_candidate *c, double *scale, double *rot,
+                     double *bend)
+{
+    double xy[2];
+    double dx = x1 - x0;
+    double dy = y1 - y0;
+    double seg_ch = hypot(dx, dy);
+    double seg_th = atan2(dy, dx);
+    double ch;
+    double th_even, th_odd;
+    double ul, vl, ur, vr;
+
+    *bend = fabs(ks[0]) + fabs(.5 * ks[1]) + fabs(.125 * ks[2]) +
+            fabs((1./48) * ks[3]);
+    integrate_spiro(ks, xy, N_IS);
+    ch = hypot(xy[0], xy[1]);
+    if (!(ch > 0) || !(seg_ch > 0)) {
+        if (seg_ch == 0 && ch == 0 && *bend <= 1e-8) {
+            c->p0x = x0 * dm[0] + dm[1];
+            c->p0y = y0 * dm[0] + dm[2];
+            c->p1x = c->p2x = c->p3x = c->p0x;
+            c->p1y = c->p2y = c->p3y = c->p0y;
+            *scale = 0;
+            *rot = 0;
+            return 1;
+        }
+        return 0;
+    }
+
+    *scale = seg_ch / ch;
+    *rot = seg_th - atan2(xy[1], xy[0]);
+    th_even = (1./384) * ks[3] + (1./8) * ks[1] + *rot;
+    th_odd = (1./48) * ks[2] + .5 * ks[0];
+    ul = (*scale * (1./3)) * cos(th_even - th_odd);
+    vl = (*scale * (1./3)) * sin(th_even - th_odd);
+    ur = (*scale * (1./3)) * cos(th_even + th_odd);
+    vr = (*scale * (1./3)) * sin(th_even + th_odd);
+
+    c->p0x = x0 * dm[0] + dm[1];
+    c->p0y = y0 * dm[0] + dm[2];
+    c->p1x = (x0 + ul) * dm[0] + dm[1];
+    c->p1y = (y0 + vl) * dm[0] + dm[2];
+    c->p2x = (x1 - ur) * dm[0] + dm[1];
+    c->p2y = (y1 - vr) * dm[0] + dm[2];
+    c->p3x = x1 * dm[0] + dm[1];
+    c->p3y = y1 * dm[0] + dm[2];
+    return 1;
+}
+
+static double
+spiro_candidate_error(const spiro_cubic_candidate *c, const double ks[4],
+                      double scale, double rot, int is_line)
+{
+    spiro_cubic_candidate bench = *c;
+    double max_d = 0;
+    double max_dp = 0;
+    double b2;
+    double s2;
+    double kappa;
+    double h = 1. / (SPIRO_TOL_SAMPLES - 1);
+    double bound;
+    double floor;
+    int i;
+
+    if (is_line) {
+        bench.p1x = c->p0x + (c->p3x - c->p0x) / 3;
+        bench.p1y = c->p0y + (c->p3y - c->p0y) / 3;
+        bench.p2x = c->p0x + 2 * (c->p3x - c->p0x) / 3;
+        bench.p2y = c->p0y + 2 * (c->p3y - c->p0y) / 3;
+    }
+
+    for (i = 0; i < SPIRO_TOL_SAMPLES; i++) {
+        double t = i * h;
+        double sp[2], sdp[2], bp[2], bdp[2];
+        double dx, dy, ddx, ddy;
+
+        spiro_eval_prefix(ks, t, scale, rot, c->p0x, c->p0y, sp, sdp);
+        spiro_cubic_eval(&bench, t, bp, bdp);
+        dx = sp[0] - bp[0];
+        dy = sp[1] - bp[1];
+        ddx = sdp[0] - bdp[0];
+        ddy = sdp[1] - bdp[1];
+        if (hypot(dx, dy) > max_d) max_d = hypot(dx, dy);
+        if (hypot(ddx, ddy) > max_dp) max_dp = hypot(ddx, ddy);
+    }
+
+    if (is_line) {
+        b2 = 0;
+    } else {
+        double ax = 6 * (c->p2x - 2 * c->p1x + c->p0x);
+        double ay = 6 * (c->p2y - 2 * c->p1y + c->p0y);
+        double bx = 6 * (c->p3x - 2 * c->p2x + c->p1x);
+        double by = 6 * (c->p3y - 2 * c->p2y + c->p1y);
+        b2 = hypot(ax, ay);
+        if (hypot(bx, by) > b2) b2 = hypot(bx, by);
+    }
+    kappa = fabs(ks[0]) + .5 * fabs(ks[1]) + .125 * fabs(ks[2]) +
+            (1./48) * fabs(ks[3]);
+    s2 = scale * kappa;
+    floor = SPIRO_TOL_EPS * (scale + fabs(c->p0x) + fabs(c->p0y) +
+                             fabs(c->p3x) + fabs(c->p3y));
+    bound = max_d + .5 * h * max_dp + .125 * h * h * (s2 + b2) + floor;
+    return bound;
+}
+
+static int
+spiro_emit_tol_segment(const double ks[4], const double *dm,
+                       double x0, double y0, double x1, double y1,
+                       double tolerance, int depth,
+                       spiro_tol_emit emit, void *ctx)
+{
+    spiro_cubic_candidate c;
+    spiro_batch_segment out;
+    double scale, rot, bend;
+    double err;
+
+    if (!spiro_make_candidate(ks, dm, x0, y0, x1, y1, &c, &scale, &rot, &bend))
+        return 0;
+
+    if (bend <= 1e-8) {
+        err = spiro_candidate_error(&c, ks, scale * fabs(dm[0]), rot, 1);
+        if (err <= tolerance) {
+            memset(&out, 0, sizeof(out));
+            out.ty = 'l';
+            out.x0 = c.p0x;
+            out.y0 = c.p0y;
+            out.x1 = c.p3x;
+            out.y1 = c.p3y;
+            out.err = err;
+            return emit(ctx, &out);
+        }
+    }
+
+    err = spiro_candidate_error(&c, ks, scale * fabs(dm[0]), rot, 0);
+    if (err <= tolerance) {
+        memset(&out, 0, sizeof(out));
+        out.ty = 'c';
+        out.x0 = c.p0x;
+        out.y0 = c.p0y;
+        out.x1 = c.p1x;
+        out.y1 = c.p1y;
+        out.x2 = c.p2x;
+        out.y2 = c.p2y;
+        out.x3 = c.p3x;
+        out.y3 = c.p3y;
+        out.err = err;
+        return emit(ctx, &out);
+    }
+
+    if (depth >= SPIRO_TOL_MAX_DEPTH)
+        return 0;
+
+    {
+        double ksub[4];
+        double xysub[2];
+        double thsub, cth, sth;
+        double xmid, ymid;
+        int left_ok;
+
+        ksub[0] = .5 * ks[0] - .125 * ks[1] + (1./64) * ks[2] -
+                  (1./768) * ks[3];
+        ksub[1] = .25 * ks[1] - (1./16) * ks[2] + (1./128) * ks[3];
+        ksub[2] = .125 * ks[2] - (1./32) * ks[3];
+        ksub[3] = (1./16) * ks[3];
+        thsub = rot - .25 * ks[0] + (1./32) * ks[1] -
+                (1./384) * ks[2] + (1./6144) * ks[3];
+        cth = .5 * scale * cos(thsub);
+        sth = .5 * scale * sin(thsub);
+        integrate_spiro(ksub, xysub, N_IS);
+        xmid = x0 + cth * xysub[0] - sth * xysub[1];
+        ymid = y0 + cth * xysub[1] + sth * xysub[0];
+
+        left_ok = spiro_emit_tol_segment(ksub, dm, x0, y0, xmid, ymid,
+                                         tolerance, depth + 1, emit, ctx);
+        if (!left_ok)
+            return 0;
+        ksub[0] += .25 * ks[1] + (1./384) * ks[3];
+        ksub[1] += .125 * ks[2];
+        ksub[2] += (1./16) * ks[3];
+        return spiro_emit_tol_segment(ksub, dm, xmid, ymid, x1, y1,
+                                      tolerance, depth + 1, emit, ctx);
+    }
+}
+
+static int
+spiro_emit_tol_command(spiro_tol_emit emit, void *ctx, char ty,
+                       double x0, double y0, double x1, double y1,
+                       double x2, double y2, double x3, double y3,
+                       double err)
+{
+    spiro_batch_segment out;
+
+    memset(&out, 0, sizeof(out));
+    out.ty = ty;
+    out.x0 = x0;
+    out.y0 = y0;
+    out.x1 = x1;
+    out.y1 = y1;
+    out.x2 = x2;
+    out.y2 = y2;
+    out.x3 = x3;
+    out.y3 = y3;
+    out.err = err;
+    return emit(ctx, &out);
+}
+
+LS_DLL_LOCAL
+int
+spiro_to_bpath_tol0(const spiro_cp *src, const spiro_seg *s,
+                    double *dm, int ncq, int n, double tolerance,
+                    spiro_tol_emit emit, void *ctx)
+{
+    int i, j, lk, nsegs, z;
+    double x0, y0, x1, y1;
+
+    if (s == NULL || n <= 0 || ncq < 0 || emit == NULL || !(tolerance > 0) ||
+        !IS_FINITE(tolerance))
+        return 0;
+
+    nsegs = n;
+    if (s[0].ty == '{') {
+        if (n >= 2 && s[n - 2].ty == 'a')
+            --nsegs;
+        --nsegs;
+        z = -1;
+    } else {
+        if (s[n - 1].ty == 'z')
+            --nsegs;
+        z = nsegs - 1;
+    }
+    if (nsegs <= 0)
+        return 0;
+
+    lk = (ncq & SPIRO_INCLUDE_LAST_KNOT) && s[n - 1].ty == '}' ? 1 : 0;
+    for (i = j = 0; i < nsegs; i++, j++) {
+        x0 = s[i].x;
+        y0 = s[i].y;
+        if (i == 0) {
+            if (!spiro_emit_tol_command(emit, ctx, 'm', 0, 0,
+                                        src[0].x, src[0].y, 0, 0, 0, 0, 0))
+                return 0;
+            if (nsegs > 1 && s[1].ty == 'h')
+                ++i;
+        } else if (s[i].ty == 'a') {
+            ++i;
+        }
+        if (i == z) {
+            x1 = s[0].x;
+            y1 = s[0].y;
+        } else {
+            x1 = s[i + 1].x;
+            y1 = s[i + 1].y;
+        }
+        if (!spiro_emit_tol_command(emit, ctx, 'k', 0, 0, 0, 0, 0, 0, 0, 0, 0))
+            return 0;
+        if (!spiro_emit_tol_segment(s[i].ks, dm, x0, y0, x1, y1,
+                                    tolerance, 0, emit, ctx))
+            return 0;
+    }
+    if (lk) {
+        if (!spiro_emit_tol_command(emit, ctx, 'k', 0, 0, 0, 0, 0, 0, 0, 0, 0))
+            return 0;
+    }
+    return 1;
 }
 
 /* deprecated / keep backwards compatibility / not scalable */

@@ -15,7 +15,7 @@ noinst_PROGRAMS = unit-test  call-test0 call-test1 call-test2 call-test3 \
 		  call-test9 call-test10 call-test11 call-test12	 \
 		  call-test13 call-test14 call-test15 call-test16	 \
 		  call-test17 call-test18 call-test19 call-test20	 \
-		  call-test21 call-testm
+		  call-test21 call-testm batch-test
 
 unit_test_SOURCES = unit-test.c
 
@@ -90,5 +90,8 @@ call_testm_LDADD = $(LDADDS)
 if WANTPTHREADS
 call_testm_LDADD += -lpthread
 endif
+
+batch_test_SOURCES = batch-test.c
+batch_test_LDADD = $(LDADDS)
 
 TESTS = $(noinst_PROGRAMS)

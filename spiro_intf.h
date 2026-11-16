@@ -4,6 +4,8 @@ libspiro - A sharable library of Spiro formula and functions.
 #ifndef _SPIRO_INTF_H
 #define _SPIRO_INTF_H
 
+#include "spirobatch.h"
+
 /* Generic helper definitions for shared library support */
 /* as explained in - https://gcc.gnu.org/wiki/Visibility */
 #if defined (_WIN32) || defined (__CYGWIN__) || (_WIN64) || defined (__CYGWIN64__)
@@ -32,5 +34,11 @@ libspiro - A sharable library of Spiro formula and functions.
 #endif
 
 int spiroreverse(spiro_cp *src, int n); /* internal use */
+
+typedef int (*spiro_tol_emit)(void *ctx, const spiro_batch_segment *segment);
+
+int spiro_to_bpath_tol0(const spiro_cp *src, const spiro_seg *s,
+                        double *dm, int ncq, int n, double tolerance,
+                        spiro_tol_emit emit, void *ctx);
 
 #endif
